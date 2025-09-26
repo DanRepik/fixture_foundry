@@ -1,11 +1,11 @@
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["flit_core>=3.8,<4"]
+build-backend = "flit_core.buildapi"
 
 [project]
 name = "fixture-foundry"
 version = "0.1.0"
-description = "A Python library for creating and managing test fixtures"
+description = "Fixtures and helpers to create AWS infrastructure (via LocalStack) and containerized databases locally for fast, reproducible integration testing."
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.8"
@@ -16,7 +16,6 @@ keywords = ["testing", "fixtures", "test-data", "python"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.8",
@@ -48,16 +47,13 @@ Homepage = "https://github.com/DanRepik/fixture_foundry"
 Repository = "https://github.com/DanRepik/fixture_foundry"
 Issues = "https://github.com/DanRepik/fixture_foundry/issues"
 
-[tool.hatch.build.targets.wheel]
-packages = ["src/fixture_foundry"]
+# If you keep a src/ layout, tell Flit where the package lives:
+[tool.flit.module]
+name = "fixture_foundry"
+path = "src"
 
-[tool.hatch.build.targets.sdist]
-include = [
-    "/src",
-    "/tests",
-    "/README.md",
-    "/LICENSE",
-]
+[tool.flit.sdist]
+include = ["src", "tests", "README.md", "LICENSE"]
 
 [tool.black]
 line-length = 88

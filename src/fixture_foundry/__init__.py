@@ -5,3 +5,5 @@ __author__ = "Dan Repik"
 __email__ = "dan.repik@example.com"
 
 __all__ = ["__version__"]
+
+from .infrastructure_fixtures import *  # noqa: F403, F401
