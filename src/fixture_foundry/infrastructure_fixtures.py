@@ -30,8 +30,28 @@ def deploy(
     teardown: bool = True,
 ) -> Generator[Dict[str, str], None, None]:
     """
-    Deploy a Pulumi program optionally targeting LocalStack and yield ONLY the
-    stack outputs (plain dict). Cleans up on exit if teardown=True.
+    Deploy a Pulumi program and yield only the stack outputs (as a plain dict).
+
+    Behavior:
+    - If localstack is provided, injects AWS provider config (region, test creds,
+      service endpoints, and "skip*" flags) so the program targets LocalStack
+      instead of real AWS.
+    - Best-effort pre-clean: attempts destroy before update to ensure a fresh run.
+    - Runs refresh, then up; yields outputs as {name: value}.
+    - On context exit, destroys the stack and removes it from the workspace when
+      teardown=True.
+
+    Parameters:
+      project_name: Pulumi project name for the Automation API Stack.
+      stack_name  : Logical stack identifier (e.g., "test", "ci-123").
+      pulumi_program: A zero-arg function that defines the Pulumi resources.
+      config      : Optional explicit config map to set on the stack.
+      localstack  : Optional dict from the localstack fixture with keys:
+                    endpoint_url, region, services.
+      teardown    : Whether to destroy/remove the stack on exit.
+
+    Yields:
+      Dict[str, str]: Exported stack outputs with raw values.
     """
     stack = auto.create_or_select_stack(
         stack_name=stack_name, project_name=project_name, program=pulumi_program
@@ -91,9 +111,15 @@ def deploy(
 @pytest.fixture(scope="session")
 def test_network(request: pytest.FixtureRequest) -> Generator[str, None, None]:
     """
-    Ensure a user-defined Docker network exists for cross-container comms
-    (e.g., LocalStack Lambdas <-> Postgres). Yields the network name.
-    Respects DOCKER_TEST_NETWORK env var; defaults to 'ls-dev'.
+    Ensure a user-defined Docker bridge network exists for cross-container traffic
+    (e.g., LocalStack Lambdas connecting to Postgres). Yields the network name.
+
+    Environment:
+      DOCKER_TEST_NETWORK: Override the network name (default: "ls-dev").
+
+    Teardown:
+      If the fixture created the network and --teardown=true, the network is
+      removed at session end.
     """
 
     network_name = os.environ.get("DOCKER_TEST_NETWORK", "ls-dev")
@@ -127,8 +153,12 @@ def _get_bool_option(
     request: pytest.FixtureRequest, name: str, default: bool = True
 ) -> bool:
     """
-    Return a boolean for a --<name> CLI option added via pytest_addoption.
-    Accepts true/false/yes/no/1/0 (case-insensitive). Falls back to default if unset.
+    Read a boolean CLI option added via pytest_addoption.
+
+    Accepted truthy values (case-insensitive): 1, true, yes, y
+    Accepted falsy  values (case-insensitive): 0, false, no, n
+
+    Falls back to 'default' if the option is missing or not parseable.
     """
     opt = f"--{name}"
     try:
@@ -141,6 +171,18 @@ def _get_bool_option(
 
 
 def exec_sql_file(conn, sql_path: Path):
+    """
+    Execute a SQL script file against an open DB-API connection.
+
+    Notes:
+    - Reads the entire file and executes it in a single cursor.execute call.
+    - Supports PostgreSQL DO $$ ... $$ blocks and multi-statement scripts.
+    - Caller is responsible for transaction handling (e.g., conn.autocommit = True).
+
+    Parameters:
+      conn    : psycopg2 connection (or DB-API compatible).
+      sql_path: Path to the .sql file to execute.
+    """
     sql_text = sql_path.read_text(encoding="utf-8")
     # Execute entire script (supports DO $$ ... $$ blocks and multiple statements)
     with conn.cursor() as cur:
@@ -152,8 +194,24 @@ def postgres(
     request: pytest.FixtureRequest, test_network
 ) -> Generator[dict, None, None]:
     """
-    Starts a PostgreSQL container and yields connection info.
-    Uses a random host port mapped to 5432.
+    Start a PostgreSQL container and yield connection information for tests.
+
+    Ports:
+      - Inside Docker network: {container_name}:5432 (for other containers, e.g., Lambda)
+      - From host (pytest process): localhost:{host_port} (random mapped port)
+
+    Yields:
+      Dict with:
+        container_name : Docker name (reachable by other containers on test_network)
+        container_port : 5432
+        username       : Database user
+        password       : Database password
+        database       : Database name (from --database)
+        host_port      : Host-mapped TCP port for 5432
+        dsn            : postgresql://user:pass@localhost:{host_port}/{database}
+
+    Teardown:
+      Stops and removes the container when the session ends.
     """
     import psycopg2
 
@@ -234,7 +292,18 @@ def postgres(
 
 
 def _wait_for_localstack(endpoint: str, timeout: int = 90) -> None:
-    """Wait until LocalStack health endpoint reports ready or timeout expires."""
+    """
+    Poll LocalStack health endpoints until ready or timeout.
+
+    Tries both /_localstack/health (newer) and /health (legacy) and considers
+    LocalStack ready when:
+      - JSON includes initialized=true, or
+      - a services map is present, or
+      - a 200 OK is returned with parseable/empty body.
+
+    Raises:
+      RuntimeError if the timeout elapses without a healthy response.
+    """
     url_candidates = [
         f"{endpoint}/_localstack/health",  # modern health endpoint
         f"{endpoint}/health",  # legacy fallback
@@ -275,13 +344,29 @@ def localstack(
     request: pytest.FixtureRequest, test_network
 ) -> Generator[Dict[str, str], None, None]:
     """
-    Session-scoped fixture that runs a LocalStack container.
+    Run a LocalStack container for the test session and yield connection details.
 
-    Yields a dict with:
-      - endpoint_url: Edge endpoint URL (e.g., http://127.0.0.1:4566)
-      - region: AWS region configured
-      - container_id: Docker container id
-      - services: comma list of services configured
+    Configuration (pytest options):
+      --localstack-image     : Image tag (default: localstack/localstack:latest)
+      --localstack-services  : Comma-separated services to enable
+      --localstack-timeout   : Health check timeout (seconds)
+      --localstack-port      : Host edge port (0 = random)
+      --teardown             : Stop/remove container at session end (default true)
+
+    Behavior:
+      - Joins the shared Docker network (test_network).
+      - Mounts /var/run/docker.sock so LocalStack can run Lambda containers.
+      - Sets LAMBDA_DOCKER_NETWORK so Lambda containers can reach Postgres by
+        container name.
+      - Exposes only the edge port (4566).
+
+    Yields:
+      Dict with:
+        endpoint_url : e.g., http://localhost:4566
+        region       : AWS region in use
+        container_id : LocalStack container id
+        services     : Comma list of configured services
+        port         : Host port for the edge endpoint (as string)
     """
     teardown: bool = _get_bool_option(request, "--teardown", default=True)
     port: int = int(request.config.getoption("--localstack-port"))
@@ -406,27 +491,20 @@ def localstack(
 
 def to_localstack_url(api_url: str, edge_port: int = 4566, scheme: str = "http") -> str:
     """
-    Convert a real API Gateway invoke URL (or the exported domain/path) into the
-    equivalent LocalStack invoke URL.
+    Convert an AWS API Gateway invoke URL into the equivalent LocalStack edge URL.
 
-    Accepts forms like:
-      https://a1b2c3d4.execute-api.us-east-1.amazonaws.com/dev
-      https://a1b2c3d4.execute-api.us-east-1.amazonaws.com/dev/hello?name=Bob
-      a1b2c3d4.execute-api.us-east-1.amazonaws.com/dev
-      a1b2c3d4.execute-api.us-east-1.amazonaws.com/dev/hello
-    Already-converted LocalStack URLs are returned unchanged:
-      http://a1b2c3d4.execute-api.localhost.localstack.cloud:4566/dev/hello
-
-    Parameters:
-      api_url   : Original AWS API Gateway invoke URL or domain + path.
-      edge_port : LocalStack edge port (default 4566 or whatever container mapped).
-      scheme    : Scheme to use for returned URL (default http).
+    Accepts:
+      - Full URLs: https://{id}.execute-api.{region}.amazonaws.com/{stage}/path?query
+      - Bare host/path: {id}.execute-api.{region}.amazonaws.com/{stage}/path
+      - Already-converted LocalStack hostnames are normalized and returned.
 
     Returns:
-      LocalStack URL pointing at the same stage/path.
+      URL targeting {id}.execute-api.localhost.localstack.cloud:{edge_port} with the
+      same path, query, and fragment, using the provided scheme (default http).
 
     Raises:
-      ValueError if input is not a recognizable API Gateway invoke URL.
+      ValueError if the hostname does not match an API Gateway pattern or if the
+      stage segment is missing from the path.
     """
     import re
     from urllib.parse import urlparse, urlunparse
