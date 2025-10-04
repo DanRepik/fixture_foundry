@@ -2,8 +2,9 @@
 
 __version__ = "0.1.0"
 __author__ = "Dan Repik"
-__email__ = "dan.repik@example.com"
 
 __all__ = ["__version__"]
 
-from .infrastructure_fixtures import *  # noqa: F403, F401
+from .fixtures import *  # noqa: F403, F401
+from .context import *  # noqa: F403, F401
+from .utils import *  # noqa: F403, F401

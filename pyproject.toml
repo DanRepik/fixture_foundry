@@ -1,10 +1,10 @@
 [build-system]
-requires = ["flit_core>=3.8,<4"]
-build-backend = "flit_core.buildapi"
+requires = ["hatchling>=1.18"]
+build-backend = "hatchling.build"
 
 [project]
 name = "fixture-foundry"
-version = "0.1.0"
+version = "0.1.1"
 description = "Fixtures and helpers to create AWS infrastructure (via LocalStack) and containerized databases locally for fast, reproducible integration testing."
 readme = "README.md"
 license = "MIT"
@@ -30,12 +30,16 @@ dependencies = []
 
 [project.optional-dependencies]
 dev = [
+    "docker>=7.1.0",
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
     "black>=23.0.0",
     "isort>=5.12.0",
     "flake8>=6.0.0",
+    "psycopg2-binary>=2.9.10",
+    "pulumi>=3.198.0",
     "mypy>=1.0.0",
+    "requests>=2.32.5",
 ]
 docs = [
     "sphinx>=5.0.0",
@@ -48,12 +52,16 @@ Repository = "https://github.com/DanRepik/fixture_foundry"
 Issues = "https://github.com/DanRepik/fixture_foundry/issues"
 
 # If you keep a src/ layout, tell Flit where the package lives:
-[tool.flit.module]
-name = "fixture_foundry"
-path = "src"
+[tool.hatch.build.targets.wheel]
+packages = ["src/fixture_foundry"]
 
-[tool.flit.sdist]
-include = ["src", "tests", "README.md", "LICENSE"]
+[tool.hatch.build.targets.sdist]
+include = [
+    "src",
+    "tests",
+    "README.md",
+    "LICENSE",
+]
 
 [tool.black]
 line-length = 88
@@ -81,6 +89,14 @@ force_grid_wrap = 0
 use_parentheses = true
 ensure_newline_before_comments = true
 line_length = 88
+
+[tool.flake8]
+max-line-length = 88
+# Keep Flake8 compatible with Black's style
+extend-ignore = [
+    "E203",  # Whitespace before ':' (Black-compatible)
+    "W503"   # Line break before binary operator (Black-compatible)
+]
 
 [tool.mypy]
 python_version = "3.8"

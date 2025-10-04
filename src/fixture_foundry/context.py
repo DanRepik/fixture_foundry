@@ -1,3 +1,35 @@
+"""Fixture Foundry context utilities.
+
+This module provides small context managers and helpers that make
+ephemeral infrastructure easy to use in tests and dev scripts.
+
+Features:
+- deploy: Run a Pulumi program via the Automation API. Supports
+    LocalStack by injecting AWS config. Yields a dict of stack outputs.
+    Cleans up on exit when teardown is True.
+- container_network_context: Ensure a Docker bridge network exists for
+    the duration of a block. Optionally remove it on exit if created here.
+- postgres_context: Start a disposable PostgreSQL container, wait for
+    ready, and yield connection details (DSN, host port, credentials).
+- localstack_context: Start LocalStack on a Docker network, wait for
+    health, and yield endpoint and metadata. Optionally stop and remove
+    on exit.
+- exec_sql_file: Execute a .sql file against a DB-API connection in one
+    call.
+- to_localstack_url: Convert an AWS API Gateway URL to the LocalStack
+    edge URL.
+
+Requirements:
+- Docker must be available for container contexts.
+- Pulumi must be installed for deploy(). Uses the Automation API.
+
+Notes:
+- Contexts try to clean up on best effort and swallow errors during
+    teardown so tests remain resilient.
+- DEFAULT_REGION is taken from AWS_REGION or AWS_DEFAULT_REGION, then
+    falls back to "us-east-1".
+"""
+
 import os
 import time
 import json
@@ -5,14 +37,16 @@ import logging
 from contextlib import contextmanager
 from typing import Dict, Generator, Optional
 from pathlib import Path
+import re
+from urllib.parse import urlparse, urlunparse
+import uuid
 
-import docker
-import pytest
 import requests
+import psycopg2
+import docker
+import docker.errors
+import docker.types
 from pulumi import automation as auto  # Pulumi Automation API
-
-from docker.errors import DockerException
-from docker.types import Mount
 
 log = logging.getLogger(__name__)
 DEFAULT_REGION = os.environ.get(
@@ -25,7 +59,6 @@ def deploy(
     project_name: str,
     stack_name: str,
     pulumi_program,
-    config: Dict[str, auto.ConfigValue] | None = None,
     localstack: dict | None = None,
     teardown: bool = True,
 ) -> Generator[Dict[str, str], None, None]:
@@ -64,7 +97,7 @@ def deploy(
         except Exception:
             pass
 
-        if config is None and localstack:
+        if localstack:
             services_map = [
                 {
                     svc: localstack["endpoint_url"]
@@ -83,8 +116,6 @@ def deploy(
                 "aws:insecure": auto.ConfigValue("true"),
                 "aws:s3UsePathStyle": auto.ConfigValue("true"),
             }
-
-        if config:
             stack.set_all_config(config)
 
         try:
@@ -108,134 +139,56 @@ def deploy(
                 pass
 
 
-@pytest.fixture(scope="session")
-def test_network(request: pytest.FixtureRequest) -> Generator[str, None, None]:
-    """
-    Ensure a user-defined Docker bridge network exists for cross-container traffic
-    (e.g., LocalStack Lambdas connecting to Postgres). Yields the network name.
-
-    Environment:
-      DOCKER_TEST_NETWORK: Override the network name (default: "ls-dev").
-
-    Teardown:
-      If the fixture created the network and --teardown=true, the network is
-      removed at session end.
-    """
-
-    network_name = os.environ.get("DOCKER_TEST_NETWORK", "ls-dev")
+@contextmanager
+def container_network_context(network_name: Optional[str], teardown: Optional[bool]) -> Generator[str, None, None]:
     client = docker.from_env()
 
     net = None
-    for n in client.networks.list(names=[network_name]):
+    for n in client.networks.list(names=[network_name] if network_name else []):
         if n.name == network_name:
             net = n
             break
 
     created = False
     if net is None:
+        if not network_name:
+            network_name = f"test-network-{uuid.uuid4()}"
         net = client.networks.create(network_name, driver="bridge")
         created = True
 
     try:
+        # Ensure network_name is always a str here
+        assert network_name is not None
         yield network_name
     finally:
-        # Remove only if we created it and teardown is enabled
-        teardown = _get_bool_option(request, "teardown", default=True)
         if created and teardown:
             try:
                 net.remove()
             except Exception:
                 pass
 
-
-# Helper for boolean CLI options
-def _get_bool_option(
-    request: pytest.FixtureRequest, name: str, default: bool = True
-) -> bool:
-    """
-    Read a boolean CLI option added via pytest_addoption.
-
-    Accepted truthy values (case-insensitive): 1, true, yes, y
-    Accepted falsy  values (case-insensitive): 0, false, no, n
-
-    Falls back to 'default' if the option is missing or not parseable.
-    """
-    opt = f"--{name}"
-    try:
-        raw = request.config.getoption(opt)
-    except (AttributeError, ValueError):
-        return default
-    if raw is None:
-        return default
-    return str(raw).lower() in ("1", "true", "yes", "y")
-
-
-def exec_sql_file(conn, sql_path: Path):
-    """
-    Execute a SQL script file against an open DB-API connection.
-
-    Notes:
-    - Reads the entire file and executes it in a single cursor.execute call.
-    - Supports PostgreSQL DO $$ ... $$ blocks and multi-statement scripts.
-    - Caller is responsible for transaction handling (e.g., conn.autocommit = True).
-
-    Parameters:
-      conn    : psycopg2 connection (or DB-API compatible).
-      sql_path: Path to the .sql file to execute.
-    """
-    sql_text = sql_path.read_text(encoding="utf-8")
-    # Execute entire script (supports DO $$ ... $$ blocks and multiple statements)
-    with conn.cursor() as cur:
-        cur.execute(sql_text)
-
-
-@pytest.fixture(scope="session")
-def postgres(
-    request: pytest.FixtureRequest, test_network
-) -> Generator[dict, None, None]:
-    """
-    Start a PostgreSQL container and yield connection information for tests.
-
-    Ports:
-      - Inside Docker network: {container_name}:5432 (for other containers, e.g., Lambda)
-      - From host (pytest process): localhost:{host_port} (random mapped port)
-
-    Yields:
-      Dict with:
-        container_name : Docker name (reachable by other containers on test_network)
-        container_port : 5432
-        username       : Database user
-        password       : Database password
-        database       : Database name (from --database)
-        host_port      : Host-mapped TCP port for 5432
-        dsn            : postgresql://user:pass@localhost:{host_port}/{database}
-
-    Teardown:
-      Stops and removes the container when the session ends.
-    """
-    import psycopg2
+@contextmanager
+def postgres_context(username: Optional[str], 
+                     password: Optional[str], 
+                     database: str, image: Optional[str], 
+                     container_network: str) -> Generator[dict[str, str | int], None, None]:
 
     try:
         client = docker.from_env()
         client.ping()
-    except Exception as e:
+    except docker.errors.DockerException as e:
         assert False, f"Docker not available: {e}"
 
-    username = "test_user"
-    password = "test_password"
-    database = request.config.getoption("--database")
-    image = request.config.getoption("--database-image")
-
     container = client.containers.run(
-        image,
+        image or "postgres:15-alpine",
         environment={
-            "POSTGRES_USER": username,
-            "POSTGRES_PASSWORD": password,
+            "POSTGRES_USER": username or "testuser",
+            "POSTGRES_PASSWORD": password or "testpassword",
             "POSTGRES_DB": database,
         },
         ports={"5432/tcp": 0},  # random host port
         detach=True,
-        network=test_network,
+        network=container_network,
     )
 
     try:
@@ -268,7 +221,7 @@ def postgres(
                 )
                 conn.close()
                 break
-            except Exception:
+            except psycopg2.OperationalError:
                 time.sleep(0.5)
 
         yield {
@@ -318,7 +271,7 @@ def _wait_for_localstack(endpoint: str, timeout: int = 90) -> None:
                 if resp.status_code == 200:
                     try:
                         data = resp.json()
-                    except Exception:
+                    except ValueError:
                         data = {}
                     # Heuristics: consider healthy if initialized true or services reported
                     if isinstance(data, dict):
@@ -329,7 +282,7 @@ def _wait_for_localstack(endpoint: str, timeout: int = 90) -> None:
                             return
                     else:
                         return
-            except Exception as e:  # noqa: PERF203 - simple polling loop
+            except requests.RequestException as e:  # noqa: PERF203 - simple polling loop
                 last_err = str(e)
                 time.sleep(0.5)
                 continue
@@ -338,55 +291,24 @@ def _wait_for_localstack(endpoint: str, timeout: int = 90) -> None:
         f"Timed out waiting for LocalStack at {endpoint} (last_err={last_err})"
     )
 
-
-@pytest.fixture(scope="session")
-def localstack(
-    request: pytest.FixtureRequest, test_network
-) -> Generator[Dict[str, str], None, None]:
-    """
-    Run a LocalStack container for the test session and yield connection details.
-
-    Configuration (pytest options):
-      --localstack-image     : Image tag (default: localstack/localstack:latest)
-      --localstack-services  : Comma-separated services to enable
-      --localstack-timeout   : Health check timeout (seconds)
-      --localstack-port      : Host edge port (0 = random)
-      --teardown             : Stop/remove container at session end (default true)
-
-    Behavior:
-      - Joins the shared Docker network (test_network).
-      - Mounts /var/run/docker.sock so LocalStack can run Lambda containers.
-      - Sets LAMBDA_DOCKER_NETWORK so Lambda containers can reach Postgres by
-        container name.
-      - Exposes only the edge port (4566).
-
-    Yields:
-      Dict with:
-        endpoint_url : e.g., http://localhost:4566
-        region       : AWS region in use
-        container_id : LocalStack container id
-        services     : Comma list of configured services
-        port         : Host port for the edge endpoint (as string)
-    """
-    teardown: bool = _get_bool_option(request, "--teardown", default=True)
-    port: int = int(request.config.getoption("--localstack-port"))
-    image: str = request.config.getoption("--localstack-image")
-    services: str = request.config.getoption("--localstack-services")
-    timeout: int = int(request.config.getoption("--localstack-timeout"))
-
+@contextmanager
+def localstack_context(image: str, services: str, port: int, timeout: int, teardown: bool, container_network: str) -> Generator[Dict[str, str], None, None]:
     if docker is None:
         assert False, "Docker SDK not available: skipping LocalStack-dependent tests"
 
     try:
         client = docker.from_env()
-    except DockerException:
+    except docker.errors.DockerException:
         assert False, "Docker daemon not available: skipping LocalStack-dependent tests"
 
     # Pull image to ensure availability
     try:
         client.images.pull(image)
-    except Exception:
-        # If pull fails, we may already have it locally — proceed
+    except docker.errors.ImageNotFound:
+        # If pull fails because image not found, we may already have it locally — proceed
+        pass
+    except docker.errors.APIError:
+        # If pull fails due to API error, we may already have it locally — proceed
         pass
 
     # Publish only the edge port; service port range is not needed with edge
@@ -397,20 +319,20 @@ def localstack(
         "SERVICES": services,
         "LS_LOG": "warn",
         "AWS_DEFAULT_REGION": DEFAULT_REGION,
-        "LAMBDA_DOCKER_NETWORK": test_network,  # ensure Lambda containers join this network
+        "LAMBDA_DOCKER_NETWORK": container_network,  # ensure Lambda containers join this network
         "DISABLE_CORS_CHECKS": "1",
     }
     # Mount Docker socket for LocalStack to access Docker if needed
     volume_dir = os.environ.get("LOCALSTACK_VOLUME_DIR", "./volume")
     Path(volume_dir).mkdir(parents=True, exist_ok=True)
     mounts = [
-        Mount(
+        docker.types.Mount(
             target="/var/run/docker.sock",
             source="/var/run/docker.sock",
             type="bind",
             read_only=False,
         ),
-        Mount(
+        docker.types.Mount(
             target="/var/lib/localstack",
             source=os.path.abspath(volume_dir),
             type="bind",
@@ -425,7 +347,7 @@ def localstack(
         name=None,
         tty=False,
         mounts=mounts,
-        network=test_network,
+        network=container_network,
     )
 
     if port == 0:
@@ -506,9 +428,6 @@ def to_localstack_url(api_url: str, edge_port: int = 4566, scheme: str = "http")
       ValueError if the hostname does not match an API Gateway pattern or if the
       stage segment is missing from the path.
     """
-    import re
-    from urllib.parse import urlparse, urlunparse
-
     if not re.match(r"^[a-z]+://", api_url):
         # prepend dummy scheme so urlparse works uniformly
         api_url = f"https://{api_url}"
