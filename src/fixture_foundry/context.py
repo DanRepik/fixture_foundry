@@ -41,12 +41,26 @@ import re
 from urllib.parse import urlparse, urlunparse
 import uuid
 
-import requests
-import psycopg2
-import docker
-import docker.errors
-import docker.types
-from pulumi import automation as auto  # Pulumi Automation API
+try:
+    import requests
+except ImportError:
+    requests = None  # type: ignore[assignment]
+
+try:
+    import psycopg2
+except ImportError:
+    psycopg2 = None  # type: ignore[assignment]
+try:
+    import docker
+    import docker.errors
+    import docker.types
+except ImportError:
+    docker = None  # type: ignore[assignment]
+
+try:
+    from pulumi import automation as auto  # Pulumi Automation API
+except ImportError:
+    auto = None  # type: ignore[assignment]
 
 log = logging.getLogger(__name__)
 DEFAULT_REGION = os.environ.get(
@@ -59,7 +73,7 @@ def deploy(
     project_name: str,
     stack_name: str,
     pulumi_program,
-    localstack: dict | None = None,
+    localstack: Optional[Dict[str, str]] = None,
     teardown: bool = True,
 ) -> Generator[Dict[str, str], None, None]:
     """
@@ -86,6 +100,9 @@ def deploy(
     Yields:
       Dict[str, str]: Exported stack outputs with raw values.
     """
+    if auto is None:
+        raise RuntimeError("Pulumi SDK not available: cannot deploy Pulumi programs")
+
     stack = auto.create_or_select_stack(
         stack_name=stack_name, project_name=project_name, program=pulumi_program
     )
@@ -94,7 +111,7 @@ def deploy(
         # Best effort pre-clean
         try:
             stack.destroy(on_output=lambda _: None)
-        except Exception:
+        except docker.errors.APIError:
             pass
 
         if localstack:
@@ -120,7 +137,7 @@ def deploy(
 
         try:
             stack.refresh(on_output=lambda _: None)
-        except Exception:
+        except auto.CommandError:
             pass
 
         up_result = stack.up(on_output=lambda _: None)
@@ -131,16 +148,19 @@ def deploy(
         if teardown:
             try:
                 stack.destroy(on_output=lambda _: None)
-            except Exception:
+            except auto.CommandError:
                 pass
             try:
                 stack.workspace.remove_stack(stack_name)
-            except Exception:
+            except auto.CommandError:
                 pass
 
 
 @contextmanager
 def container_network_context(network_name: Optional[str], teardown: Optional[bool]) -> Generator[str, None, None]:
+    if docker is None:
+        raise RuntimeError("Docker SDK not available: cannot manage container networks")
+    
     client = docker.from_env()
 
     net = None
@@ -173,6 +193,9 @@ def postgres_context(username: Optional[str],
                      database: str, image: Optional[str], 
                      container_network: str) -> Generator[dict[str, str | int], None, None]:
 
+    if docker is None:
+        raise RuntimeError("Docker SDK not available: cannot manage container networks")
+    
     try:
         client = docker.from_env()
         client.ping()
@@ -354,7 +377,7 @@ def localstack_context(image: str, services: str, port: int, timeout: int, teard
         # Resolve host port assigned for edge, with retries to avoid race condition
         host_port = None
         max_attempts = 10
-        for attempt in range(max_attempts):
+        for _ in range(max_attempts):
             container.reload()
             try:
                 port_info = container.attrs["NetworkSettings"]["Ports"]["4566/tcp"]

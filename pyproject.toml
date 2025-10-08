@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "fixture-foundry"
-version = "0.2.0"
+version = "0.2.2"
 description = "Fixtures and helpers to create AWS infrastructure (via LocalStack) and containerized databases locally for fast, reproducible integration testing."
 readme = "README.md"
 license = "MIT"

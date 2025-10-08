@@ -92,11 +92,10 @@ def postgres(
     """
     username = request.config.getoption("--database-username", "testuser")
     password = request.config.getoption("--database-password", "testpass")
-    database = request.config.getoption("--database")
-    image = request.config.getoption("--database-image")
+    database = request.config.getoption("--database", "testdb")
+    image = request.config.getoption("--database-image", "postgres:latest")
 
-    with postgres_context(username: str, password: str, 
-                          database: str, image: str, container_network: str) as pg:
+    with postgres_context(username, password, database, image, container_network) as pg:
         yield pg
 
 
@@ -177,10 +176,10 @@ def localstack(
         port         : Host port for the edge endpoint (as string)
     """
     teardown: bool = _get_bool_option(request, "--teardown", default=True)
-    port: int = int(request.config.getoption("--localstack-port"))
-    image: str = request.config.getoption("--localstack-image")
-    services: str = request.config.getoption("--localstack-services")
-    timeout: int = int(request.config.getoption("--localstack-timeout"))
+    port: int = int(request.config.getoption("--localstack-port", "0"))
+    image: str = request.config.getoption("--localstack-image", "localstack/localstack:latest")
+    services: str = request.config.getoption("--localstack-services", "s3,lambda")
+    timeout: int = int(request.config.getoption("--localstack-timeout", "90"))
 
     with localstack_context(image, services, port, timeout, teardown, container_network) as ls:
         yield ls
