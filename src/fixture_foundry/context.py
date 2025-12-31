@@ -253,7 +253,9 @@ def build_postgres(
     password: Optional[str],
     database: str,
     image: Optional[str],
-    container_network: str,
+    port: int = 0,
+    timeout: int = 90,
+    container_network: Optional[str] = None,
     seed_files: Optional[list[Path]] = None,
 ) -> tuple[object, dict[str, str | int]]:
     """
@@ -278,7 +280,7 @@ def build_postgres(
         assert False, f"Docker not available: {e}"
 
     # Use a deterministic container name for reuse when teardown=False
-    container_name = f"fixture-foundry-postgres-{database}"
+    container_name = f"postgres-{database}"
     container = None
 
     # Try to find existing container
@@ -316,7 +318,7 @@ def build_postgres(
                 "POSTGRES_PASSWORD": password or "testpassword",
                 "POSTGRES_DB": database,
             },
-            ports={"5432/tcp": 0},  # random host port
+            ports={"5432/tcp": port},  # random host port
             detach=True,
             network=container_network,
         )
@@ -324,7 +326,7 @@ def build_postgres(
     # Resolve mapped port
     host = container.name
     host_port = None
-    deadline = time.time() + 60
+    deadline = time.time() + timeout
     while time.time() < deadline:
         container.reload()
         ports = container.attrs.get("NetworkSettings", {}).get("Ports", {})
@@ -405,7 +407,9 @@ def postgres_context(
     password: Optional[str],
     database: str,
     image: Optional[str],
-    container_network: str,
+    port: int = 0,
+    timeout: int = 90,
+    container_network: Optional[str] = None,
     seed_files: Optional[list[Path]] = None,
 ) -> Generator[dict[str, str | int], None, None]:
     """
@@ -415,7 +419,14 @@ def postgres_context(
     Always removes container on exit.
     """
     container, connection_info = build_postgres(
-        username, password, database, image, container_network, seed_files
+        username=username, 
+        password=password, 
+        database=database, 
+        image=image, 
+        port=0, 
+        timeout=90, 
+        container_network=container_network, 
+        seed_files=seed_files
     )
     try:
         yield connection_info
@@ -475,9 +486,9 @@ def _wait_for_localstack(endpoint: str, timeout: int = 90) -> None:
 def build_localstack(
     image: str,
     services: str,
-    port: int,
-    timeout: int,
-    container_network: str,
+    port: int = 0,
+    timeout: int = 90,
+    container_network: Optional[str] = None,
 ) -> tuple[object, Dict[str, str | int]]:
     """
     Build or reuse a LocalStack container and wait for it to be ready.
@@ -501,7 +512,7 @@ def build_localstack(
 
     # Use deterministic name for container reuse when teardown=False
     container_name = (
-        f"fixture-foundry-localstack-"
+        f"localstack-"
         f"{port if port != 0 else 'auto'}"
     )
     container = None
@@ -679,9 +690,9 @@ def teardown_localstack(container: object) -> None:
 def localstack_context(
     image: str,
     services: str,
-    port: int,
-    timeout: int,
-    container_network: str
+    port: int = 0,
+    timeout: int = 90,
+    container_network: Optional[str] = None
 ) -> Generator[Dict[str, str | int], None, None]:
     """
     Start LocalStack on a Docker network and yield endpoint metadata.
