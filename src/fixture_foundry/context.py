@@ -257,6 +257,7 @@ def build_postgres(
     timeout: int = 90,
     container_network: Optional[str] = None,
     seed_files: Optional[list[Path]] = None,
+    volume_dir: Optional[str] = None,
 ) -> tuple[object, dict[str, str | int]]:
     """
     Build or reuse a PostgreSQL container and wait for it to be ready.
@@ -264,6 +265,8 @@ def build_postgres(
     Parameters:
       seed_files: Optional list of SQL file paths to execute after
                   container is ready.
+      volume_dir: Optional path to directory for persistent PostgreSQL data.
+                  If provided, data will persist between container restarts.
 
     Returns:
       Tuple of (container_object, connection_dict)
@@ -310,6 +313,21 @@ def build_postgres(
     except docker.errors.NotFound:
         # Container doesn't exist, create it
         log.info("Creating new postgres container: %s", container_name)
+        
+        # Prepare volume mount if requested
+        mounts = []
+        if volume_dir:
+            Path(volume_dir).mkdir(parents=True, exist_ok=True)
+            mounts.append(
+                docker.types.Mount(
+                    target="/var/lib/postgresql/data",
+                    source=os.path.abspath(volume_dir),
+                    type="bind",
+                    read_only=False,
+                )
+            )
+            log.info("PostgreSQL data will persist at: %s", volume_dir)
+        
         container = client.containers.run(
             image or "postgres:15-alpine",
             name=container_name,
@@ -321,6 +339,7 @@ def build_postgres(
             ports={"5432/tcp": port},  # random host port
             detach=True,
             network=container_network,
+            mounts=mounts if mounts else None,
         )
 
     # Resolve mapped port
@@ -411,6 +430,7 @@ def postgres_context(
     timeout: int = 90,
     container_network: Optional[str] = None,
     seed_files: Optional[list[Path]] = None,
+    volume_dir: Optional[str] = None,
 ) -> Generator[dict[str, str | int], None, None]:
     """
     Start a PostgreSQL container and yield connection details.
@@ -426,7 +446,8 @@ def postgres_context(
         port=0, 
         timeout=90, 
         container_network=container_network, 
-        seed_files=seed_files
+        seed_files=seed_files,
+        volume_dir=volume_dir,
     )
     try:
         yield connection_info
