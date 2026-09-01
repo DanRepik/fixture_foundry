@@ -34,19 +34,14 @@ def container_network(request: pytest.FixtureRequest) -> Generator[str, None, No
     Environment:
       DOCKER_TEST_NETWORK: Override the network name (default: "ls-dev").
 
-    CLI Options:
-      --teardown: If true (default), removes the network at session end if created
-                  by this fixture. If false, keeps the network for reuse.
-
     Teardown:
-      If the fixture created the network and --teardown=true, the network is
-      removed at session end.
+      If the fixture created the network, it is always removed at session end
+      (container_network_context() has no teardown-skip option).
     """
 
     network_name = os.environ.get("DOCKER_TEST_NETWORK", "ls-dev")
-    teardown: bool = _get_bool_option(request, "teardown", default=True)
-    
-    with container_network_context(network_name, teardown=teardown) as net:
+
+    with container_network_context(network_name) as net:
         yield net
 
 
@@ -83,10 +78,6 @@ def postgres(
       - Inside Docker network: {container_name}:5432 (for other containers, e.g., Lambda)
       - From host (pytest process): localhost:{host_port} (random mapped port)
 
-    CLI Options:
-      --teardown: If true (default), stops and removes the container at session end.
-                  If false, keeps the container running for reuse in subsequent runs.
-
     Yields:
       Dict with:
         container_name : Docker name (reachable by other containers on container_network)
@@ -98,16 +89,16 @@ def postgres(
         dsn            : postgresql://user:pass@localhost:{host_port}/{database}
 
     Teardown:
-      Stops and removes the container when the session ends if --teardown=true.
+      Always stops and removes the container when the session ends
+      (postgres_context() has no teardown-skip option).
     """
     username = request.config.getoption("--database-username", "testuser")
     password = request.config.getoption("--database-password", "testpass")
     database = request.config.getoption("--database", "testdb")
     image = request.config.getoption("--database-image", "postgres:latest")
-    teardown: bool = _get_bool_option(request, "teardown", default=True)
 
     with postgres_context(
-        username, password, database, image, container_network, teardown=teardown
+        username, password, database, image, container_network=container_network
     ) as pg:
         yield pg
 
@@ -171,8 +162,6 @@ def localstack(
       --localstack-services  : Comma-separated services to enable
       --localstack-timeout   : Health check timeout (seconds)
       --localstack-port      : Host edge port (0 = random)
-      --teardown             : Stop/remove container at session end (default true).
-                               If false, keeps container running for reuse.
 
     Behavior:
       - Joins the shared Docker network (container_network).
@@ -188,13 +177,18 @@ def localstack(
         container_id : LocalStack container id
         services     : Comma list of configured services
         port         : Host port for the edge endpoint (as string)
+
+    Teardown:
+      Always stops and removes the container when the session ends
+      (localstack_context() has no teardown-skip option).
     """
-    teardown: bool = _get_bool_option(request, "--teardown", default=True)
     port: int = int(request.config.getoption("--localstack-port", "0"))
     image: str = request.config.getoption("--localstack-image", "localstack/localstack:latest")
     services: str = request.config.getoption("--localstack-services", "s3,lambda")
     timeout: int = int(request.config.getoption("--localstack-timeout", "90"))
 
-    with localstack_context(image, services, port, timeout, teardown, container_network) as ls:
+    with localstack_context(
+        image, services, port, timeout, container_network=container_network
+    ) as ls:
         yield ls
 
