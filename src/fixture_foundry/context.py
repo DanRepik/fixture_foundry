@@ -455,7 +455,9 @@ def postgres_context(
         teardown_postgres(container)
 
 
-def _wait_for_localstack(endpoint: str, timeout: int = 90) -> None:
+def _wait_for_localstack(
+    endpoint: str, timeout: int = 90, container: Optional[object] = None
+) -> None:
     """
     Poll LocalStack health endpoints until ready or timeout.
 
@@ -464,6 +466,13 @@ def _wait_for_localstack(endpoint: str, timeout: int = 90) -> None:
       - JSON includes initialized=true, or
       - a services map is present, or
       - a 200 OK is returned with parseable/empty body.
+
+    Args:
+      container: The LocalStack container object, if available. On timeout,
+        its status and trailing logs are included in the error so a
+        connection-refused (container never listening) can be told apart
+        from a slow-but-alive container without a separate docker logs
+        lookup.
 
     Raises:
       RuntimeError if the timeout elapses without a healthy response.
@@ -499,8 +508,19 @@ def _wait_for_localstack(endpoint: str, timeout: int = 90) -> None:
                 time.sleep(0.5)
                 continue
         time.sleep(0.5)
+
+    diagnostics = ""
+    if container is not None:
+        try:
+            container.reload()
+            tail = container.logs(tail=100).decode("utf-8", errors="replace")
+            diagnostics = f" container_status={container.status} container_logs=\n{tail}"
+        except Exception as diag_err:  # noqa: BLE001 - best-effort diagnostics
+            diagnostics = f" (failed to fetch container diagnostics: {diag_err})"
+
     raise RuntimeError(
-        f"Timed out waiting for LocalStack at {endpoint} (last_err={last_err})"
+        f"Timed out waiting for LocalStack at {endpoint} "
+        f"(last_err={last_err}){diagnostics}"
     )
 
 
@@ -668,7 +688,7 @@ def build_localstack(
     )
 
     # Wait for the health endpoint to be ready
-    _wait_for_localstack(endpoint, timeout=timeout)
+    _wait_for_localstack(endpoint, timeout=timeout, container=container)
 
     endpoint_info = {
         "endpoint_url": endpoint,
