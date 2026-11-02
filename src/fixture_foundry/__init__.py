@@ -1,6 +1,6 @@
 """Fixture Foundry - A Python library for creating and managing test fixtures."""
 
-__version__ = "0.2.4"
+__version__ = "0.2.5"
 __author__ = "Dan Repik"
 
 __all__ = ["__version__"]
