@@ -606,14 +606,7 @@ def build_localstack(
         ports = {
             "4566/tcp": port,
         }
-        env = {
-            "SERVICES": services,
-            "LS_LOG": "warn",
-            "AWS_DEFAULT_REGION": DEFAULT_REGION,
-            # Ensure Lambda containers join this network
-            "LAMBDA_DOCKER_NETWORK": container_network,
-            "DISABLE_CORS_CHECKS": "1",
-        }
+        env = localstack_container_env(services, container_network)
         # Mount Docker socket for LocalStack to access Docker
         volume_dir = os.environ.get(
             "LOCALSTACK_VOLUME_DIR", "./volume"
@@ -725,6 +718,29 @@ def teardown_localstack(container: object) -> None:
         log.warning(f"Error removing LocalStack container: {e}")
     except Exception as e:
         log.error(f"Unexpected error removing LocalStack container: {e}")
+
+
+def localstack_container_env(
+    services: str, container_network: Optional[str]
+) -> Dict[str, str]:
+    """Environment for the LocalStack container.
+
+    LocalStack images now require an auth token to start, so
+    LOCALSTACK_AUTH_TOKEN is passed through from the host environment
+    when it is set.
+    """
+    env = {
+        "SERVICES": services,
+        "LS_LOG": "warn",
+        "AWS_DEFAULT_REGION": DEFAULT_REGION,
+        # Ensure Lambda containers join this network
+        "LAMBDA_DOCKER_NETWORK": container_network,
+        "DISABLE_CORS_CHECKS": "1",
+    }
+    auth_token = os.environ.get("LOCALSTACK_AUTH_TOKEN")
+    if auth_token:
+        env["LOCALSTACK_AUTH_TOKEN"] = auth_token
+    return env
 
 
 @contextmanager
